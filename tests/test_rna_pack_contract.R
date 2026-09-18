@@ -308,3 +308,117 @@ test_scwbrna_matrix_log_normalize_publication_contract <- function() {
     isTRUE(scworkbench::wb_bundle_validation_report(x$root, "content")$ok))
   TRUE
 }
+
+test_scwbrna_zero_library_fragment_partition_contract <- function() {
+  .rna_activate()
+  root <- tempfile("scwbrna_zero_library_fragment_")
+  bundle <- scworkbench::wb_init_bundle(root, overwrite = TRUE)
+  on.exit({try(scworkbench::wb_close_bundle(bundle), silent = TRUE)
+    unlink(root, recursive = TRUE, force = TRUE)}, add = TRUE)
+  features <- c("g1", "g2")
+  cells <- c("positive_library", "zero_library")
+  counts <- matrix(c(1, 2, 0, 0), nrow = 2L,
+    dimnames = list(features, cells))
+  scworkbench::wb_define_cells(bundle, cells)
+  scworkbench::wb_attach_matrix(bundle, "RNA",
+    Matrix::Matrix(counts, sparse = TRUE), feature_type = "gene")
+
+  execute <- function(chunk_size) {
+    output_id <- paste0("RNA_log_chunk", chunk_size)
+    result <- scworkbench::wb_session_run_op(
+      scworkbench::wb_session_new(), bundle,
+      "scwbrna::matrix_log_normalize", inputs = list(matrix = "RNA",
+        cell_set = "all", min_cells = 1L, output_matrix_id = output_id,
+        scale_factor = 1000, overwrite = FALSE,
+        chunk_size = as.integer(chunk_size)))
+    summary <- result$run$outputs$summary$table
+    manifest <- result$run$outputs$matrix$fragment_manifest
+    stopifnot(summary$n_zero_library_cells[[1L]] == 1L,
+      summary$n_fragments[[1L]] == length(cells) / chunk_size,
+      manifest$fragment_count == length(cells) / chunk_size)
+    promoted <- scworkbench::wb_session_promote_current(bundle,
+      result$session, outputs = "summary",
+      created_by = "zero-library-fragment-regression")
+    stopifnot(all(promoted$promoted$status == "ok"))
+    list(output_id = output_id, run_id = result$run$run_id,
+      transition_id = result$run$operation_pack_transition$transition_id,
+      summary = summary, manifest = manifest)
+  }
+
+  chunk_one <- execute(1L)
+  chunk_two <- execute(2L)
+  scworkbench::wb_close_bundle(bundle)
+  bundle <- scworkbench::wb_open_bundle(root, read_only = TRUE)
+
+  retained <- function(value) {
+    matrix <- as.matrix(scworkbench::wb_slice(bundle, value$output_id,
+      features, cells))
+    fragments <- scworkbench::wb_matrix_fragments(bundle, value$output_id)
+    binding_columns <- paste(c("direction", "binding_name", "entity_kind",
+      "entity_id", "relationship_type", "content_hash",
+      "content_identity_scheme", "source"), collapse = ",")
+    source_bindings <- unique(DBI::dbGetQuery(bundle$con, paste0(
+      "SELECT ", binding_columns,
+      " FROM prov_run_entity_bindings WHERE run_id=? AND entity_kind='matrix' AND entity_id='RNA' ORDER BY direction,binding_name,relationship_type;"),
+      params = list(value$run_id)))
+    output_bindings <- DBI::dbGetQuery(bundle$con,
+      "SELECT direction,binding_name,relationship_type,content_hash,content_identity_scheme FROM prov_run_entity_bindings WHERE run_id=? AND entity_kind='matrix' AND entity_id=? ORDER BY snapshot_id,direction,binding_name;",
+      params = list(value$run_id, value$output_id))
+    outputs <- DBI::dbGetQuery(bundle$con,
+      "SELECT output_name,primitive_kind FROM prov_run_outputs WHERE run_id=? ORDER BY snapshot_id,output_name;",
+      params = list(value$run_id))
+    record <- scworkbench:::.wb_operation_pack_v2_record_validate(
+      file.path(root, "operation_pack_v2", value$transition_id),
+      load_payloads = TRUE)
+    output_index <- match("matrix", vapply(record$request$outputs, `[[`,
+      character(1), "name"))
+    grant <- record$request$outputs[[output_index]]$descriptor$
+      matrix_fragment_grant
+    stopifnot(isTRUE(record$ok), nrow(source_bindings) == 1L,
+      nrow(output_bindings) >= 1L,
+      any(output_bindings$relationship_type %in% c("PRODUCES",
+        "MATERIALIZES")), any(outputs$output_name == "matrix"),
+      nrow(fragments) == value$manifest$fragment_count,
+      identical(unlist(lapply(seq_len(nrow(fragments)), function(i)
+        as.character(jsonlite::fromJSON(fragments$feature_ids_json[[i]]))),
+        use.names = FALSE), rep(features, nrow(fragments))),
+      identical(unlist(lapply(seq_len(nrow(fragments)), function(i)
+        as.character(jsonlite::fromJSON(fragments$cell_ids_json[[i]]))),
+        use.names = FALSE), cells))
+    list(matrix = matrix,
+      content = scworkbench:::.wb_operation_pack_v3_matrix_slice_content(
+        matrix, features, cells),
+      source_bindings = source_bindings,
+      source_schedule_identity = grant$source_fragment_schedule$
+        schedule_identity,
+      source_fragment_identities = unique(vapply(
+        grant$source_fragment_schedule$fragments,
+        function(fragment) fragment$source_fragment_identity$sha256,
+        character(1))))
+  }
+
+  one <- retained(chunk_one)
+  two <- retained(chunk_two)
+  expected <- log1p(t(t(counts) * (1000 / c(3, Inf))))
+  dimnames(expected) <- list(features, cells)
+  scientific_summary_fields <- c("source_matrix_id", "transform", "formula",
+    "scale_factor", "n_features", "n_cells", "n_zero_library_cells",
+    "min_library_size", "median_library_size", "max_library_size",
+    "storage_representation")
+  stopifnot(isTRUE(all.equal(one$matrix, expected,
+      tolerance = 1e-12, check.attributes = TRUE)),
+    identical(one$matrix, two$matrix), identical(one$content, two$content),
+    identical(chunk_one$summary[scientific_summary_fields],
+      chunk_two$summary[scientific_summary_fields]),
+    chunk_one$summary$n_zero_library_cells[[1L]] == 1L,
+    chunk_two$summary$n_zero_library_cells[[1L]] == 1L,
+    identical(rownames(one$matrix), features),
+    identical(colnames(one$matrix), cells),
+    identical(one$source_bindings, two$source_bindings),
+    identical(one$source_schedule_identity,
+      two$source_schedule_identity),
+    identical(one$source_fragment_identities,
+      two$source_fragment_identities),
+    isTRUE(scworkbench::wb_bundle_validation_report(root, "content")$ok))
+  TRUE
+}
