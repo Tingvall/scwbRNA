@@ -1,0 +1,12 @@
+Package: scwbRNA
+Type: Package
+Title: Provisional RNA Operation Pack for scworkbench
+Version: 0.1.0
+Authors@R: person("scworkbench", "Team", role = c("aut", "cre"), email = "noreply@example.org")
+Description: Provisional independently installable RNA QC, feature-selection,
+    and cell annotation operations for scworkbench operation-pack ABI v3.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Imports: Matrix, scworkbench
+Suggests: jsonlite
+RoxygenNote: 7.3.2

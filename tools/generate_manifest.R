@@ -1,0 +1,166 @@
+args <- commandArgs(trailingOnly = TRUE)
+root <- if (length(args)) normalizePath(args[[1]], mustWork = TRUE) else
+  normalizePath(".", mustWork = TRUE)
+
+param <- function(type, default = NULL, ..., nullable = is.null(default)) {
+  schema <- list(type = if (nullable) list(type, "null") else type)
+  if (!missing(default)) schema$default <- default
+  c(schema, list(...))
+}
+input_matrix <- list(name = "matrix", kind = "matrix", required = TRUE,
+  alignment = "cell_and_feature_ordered")
+output <- function(name, kind, group, ...) c(list(name = name,
+  category = "terminal_artifact", kind = kind,
+  storage_profile = "terminal_primitive_v1",
+  allocated_id_key = paste0(name, "_id"), required = TRUE,
+  promotion_group = group), list(...))
+dependency <- function(name, probe, specifier = ">=0.1.0,<1.0.0") list(
+  requirement_id = paste0(tolower(name), "_runtime"), kind = "r_package", name = name,
+  version = list(scheme = "r_package_version_constraint_v1",
+    specifier = specifier), disposition = "required",
+  import_probe = probe)
+matrix_chunks <- function(axis, chunk_parameter) list(name = "matrix_chunks",
+  input = "matrix", reader = "read_typed_slices", kind = "matrix",
+  supported_axes = list(axis), chunk_axis = axis,
+  chunk_size_parameter = chunk_parameter,
+  call_discipline = "ordered_partition_exactly_once",
+  empty_selection_policy = "reject", duplicate_policy = "reject",
+  selection = list(cells = list(policy = "effective_input_axis_v1"),
+    features = list(policy = "effective_input_axis_v1")))
+closure <- function(names) stats::setNames(lapply(names,
+  function(x) unname(as.list(sort(names, method = "radix")))), names)
+replay <- function(names) stats::setNames(as.list(rep(
+  "exact_canonical_value", length(names))), names)
+retained <- function(names) lapply(names, function(name) list(name = name,
+  source = "parameter_value", parameter = name, required = FALSE))
+
+cell_suffix <- list(name = "cell_suffix_label",
+  qualified_name = "scwbrna::cell_suffix_label",
+  title = "Cell Labels From ID Suffix",
+  description = "Build a categorical cell vector by parsing cell_id suffix tokens.",
+  runner = ".run_cell_suffix_label", inputs = list(),
+  params_schema = list(type = "object", properties = list(
+    sep = param("string", "-", minLength = 1, nullable = FALSE),
+    mapping = param("object", NULL, additionalProperties = list(type = "string")),
+    default_label = param("string", "UNKNOWN", nullable = FALSE)),
+    additionalProperties = FALSE),
+  registry_reads = list(list(name = "session_cells",
+    category = "authenticated_core_axis_snapshot", kind = "session_cell_axis",
+    reader = "read_session_cell_axis",
+    selection_policy = "effective_session_cells_v1",
+    coverage_policy = "exact_complete_order_v1", call_discipline = "single_use")),
+  dimension_policies = list(list(output = "labels",
+    policy = "authenticated_output_axes_v1", shape = "one_per_cell",
+    cell_axis = list(source = "session_cell_axis_read_v1",
+      registry_read = "session_cells"),
+    row_order = "session_cell_axis_order_v1", missing_values = "forbidden"),
+    list(output = "label_table", policy = "data_dependent_table_v1")),
+  outputs = list(output("labels", "cell_vector", "annotation",
+      value_kind = "categorical"),
+    output("label_table", "obs_table", "annotation",
+      table_type = "cell_suffix_label")),
+  dependencies = list(dependency("scworkbench", "wb_prim_cell_vector")),
+  promotion_closure = closure(c("labels", "label_table")),
+  replay_equivalence = replay(c("labels", "label_table")),
+  retained_parameters = retained(c("sep", "mapping", "default_label")))
+
+qc_params <- list(
+  mitochondrial_features = param("array", NULL, uniqueItems = TRUE,
+    items = list(type = "string")),
+  mitochondrial_pattern = param("string", NULL),
+  ribosomal_features = param("array", NULL, uniqueItems = TRUE,
+    items = list(type = "string")), ribosomal_pattern = param("string", NULL),
+  pattern_ignore_case = param("boolean", FALSE, nullable = FALSE),
+  missing_feature_policy = param("string", "error", nullable = FALSE,
+    enum = list("error", "drop")),
+  require_integer_counts = param("boolean", TRUE, nullable = FALSE),
+  integer_tolerance = param("number", 1e-8, nullable = FALSE, minimum = 0),
+  chunk_size = param("integer", 2000L, nullable = FALSE, minimum = 1L,
+    maximum = 1000000L))
+qc_names <- names(qc_params)
+rna_qc <- list(name = "rna_qc_metrics", qualified_name = "scwbrna::rna_qc_metrics",
+  title = "Calculate per-cell RNA QC metrics",
+  description = "Calculate count depth, detected-feature count, and explicitly defined mitochondrial/ribosomal metrics without filtering cells.",
+  runner = ".run_rna_qc_metrics", inputs = list(input_matrix),
+  params_schema = list(type = "object", properties = qc_params,
+    additionalProperties = FALSE),
+  typed_slice_reads = list(matrix_chunks("cells", "chunk_size")),
+  dimension_policies = list(list(output = "metrics",
+    policy = "authenticated_output_axes_v1",
+    shape = "bounded_grouped_cell_key_cartesian",
+    cell_axis = list(source = "effective_cells_v1", input = "matrix"),
+    key_axis = list(source = "declared_bounded_key_groups_v1",
+      required_keys = list("total_counts", "detected_features"),
+      optional_groups = list(
+        list(name = "mitochondrial", keys = list("mitochondrial_counts",
+          "mitochondrial_percent")),
+        list(name = "ribosomal", keys = list("ribosomal_counts",
+          "ribosomal_percent"))), selection_owner = "operation_pack_v1",
+      group_order = "manifest_order_v1"),
+    row_order = "key_major_then_cell_v1", missing_values = "forbidden"),
+    list(output = "qc_features", policy = "data_dependent_table_v1"),
+    list(output = "summary", policy = "data_dependent_table_v1")),
+  outputs = list(output("metrics", "cell_vector_family", "qc",
+      value_kind = "continuous"),
+    output("qc_features", "feature_table", "qc",
+      table_type = "rna_qc_feature_membership"),
+    output("summary", "obs_table", "qc",
+      table_type = "rna_qc_metrics_summary")),
+  dependencies = list(dependency("scworkbench", "wb_prim_cell_vector_family"),
+    dependency("Matrix", "colSums", ">=1.3.0")),
+  promotion_closure = closure(c("metrics", "qc_features", "summary")),
+  replay_equivalence = replay(c("metrics", "qc_features", "summary")),
+  retained_parameters = retained(qc_names))
+
+hvg_params <- list(n_features = param("integer", 2000L, nullable = FALSE,
+    minimum = 1L, maximum = 1000000L),
+  method = param("string", "vst", nullable = FALSE,
+    enum = list("vst", "dispersion", "variance")),
+  min_mean = param("number", NULL, minimum = 0),
+  max_mean = param("number", NULL, minimum = 0),
+  min_dispersion = param("number", NULL, minimum = 0),
+  batch_key = param("string", NULL),
+  exclude_features = param("array", NULL, uniqueItems = TRUE,
+    items = list(type = "string")), feature_type = param("string", NULL),
+  seed = param("integer", 1L, nullable = FALSE),
+  chunk_size = param("integer", 256L, nullable = FALSE, minimum = 1L,
+    maximum = 100000L))
+hvg <- list(name = "hvg_select", qualified_name = "scwbrna::hvg_select",
+  title = "Highly Variable Feature Selection",
+  description = "Select highly variable features from typed matrix slices and authenticated matrix-bound annotations.",
+  runner = ".run_hvg_select", inputs = list(input_matrix),
+  params_schema = list(type = "object", properties = hvg_params,
+    additionalProperties = FALSE),
+  registry_reads = list(list(name = "feature_annotations",
+    category = "authenticated_core_registry_snapshot",
+    kind = "matrix_feature_annotations",
+    reader = "read_matrix_feature_annotations", matrix_input = "matrix",
+    fields = list("feature_type"), row_order = "matrix_feature_order_v1",
+    missing_annotation_policy = "preserve_null",
+    call_discipline = "single_use")),
+  typed_slice_reads = list(matrix_chunks("features", "chunk_size")),
+  dimension_policies = list(
+    list(output = "selected_features", policy = "data_dependent_table_v1"),
+    list(output = "fit_summary", policy = "data_dependent_table_v1")),
+  outputs = list(output("selected_features", "feature_table", "hvg",
+      table_type = "feature_selection_table"),
+    output("fit_summary", "obs_table", "hvg",
+      table_type = "hvg_select_summary")),
+  dependencies = list(dependency("scworkbench", "wb_prim_feature_table"),
+    dependency("Matrix", "rowMeans", ">=1.3.0")),
+  promotion_closure = closure(c("selected_features", "fit_summary")),
+  replay_equivalence = replay(c("selected_features", "fit_summary")),
+  retained_parameters = retained(names(hvg_params)))
+
+manifest <- list(schema_version = "scworkbench.operation_pack.v3",
+  pack_abi_version = "3",
+  identity_scheme = "scworkbench.operation_pack.canonical_json.v1",
+  namespace = "scwbrna", package = list(name = "scwbRNA", version = "0.1.0"),
+  backend = "R", compatibility = list(
+    scworkbench = list(minimum = "0.1.0", maximum_exclusive = "0.2.0"),
+    pack_abi = list(minimum = "3", maximum = "3")),
+  entry_point = "scwbRNA::register_operation_pack",
+  operations = list(cell_suffix, rna_qc, hvg))
+target <- file.path(root, "inst", "scworkbench", "operation-pack.json")
+writeChar(scworkbench:::.wb_operation_pack_canonical_json(manifest), target,
+  eos = NULL, useBytes = TRUE)
