@@ -80,6 +80,19 @@ test_scwbrna_old_core_equivalence_contract <- function() {
       identical(observed[names(expected)], expected),
       identical(runs[[method]]$params, old_effective_params[[method]]))
   }
+  normalize <- scworkbench::wb_session_run_op(scworkbench::wb_session_new(),
+    x$bundle, "scwbrna::matrix_log_normalize", inputs = list(
+      matrix = "RNA", cell_set = "all", min_cells = 1L,
+      output_matrix_id = "RNA_log", scale_factor = 1000,
+      overwrite = FALSE, chunk_size = 100L))
+  expected <- x$reference$methods$matrix_log_normalize$outputs
+  observed <- lapply(normalize$run$outputs, .rna_identity,
+    bundle = scworkbench::wb_session_view(normalize$session))
+  stopifnot(identical(observed[names(expected)], expected),
+    identical(normalize$run$params$output_matrix_id, "RNA_log"),
+    identical(normalize$run$params$scale_factor, 1000),
+    identical(normalize$run$params$overwrite, FALSE),
+    identical(normalize$run$params$chunk_size, 100L))
   TRUE
 }
 
@@ -237,5 +250,61 @@ test_scwbrna_activation_rollback_contract <- function() {
     identical(before_ops, scworkbench::wb_list_ops()),
     identical(before_packs, scworkbench::wb_operation_packs()),
     identical(before_identity, scworkbench::wb_operation_catalog_identity()))
+  TRUE
+}
+
+test_scwbrna_matrix_log_normalize_publication_contract <- function() {
+  .rna_activate(); x <- .rna_fixture()
+  on.exit({try(scworkbench::wb_close_bundle(x$bundle), silent = TRUE);
+    unlink(x$root, recursive = TRUE, force = TRUE)}, add = TRUE)
+  values <- as.matrix(scworkbench::wb_slice(x$bundle, "RNA",
+    x$features, x$cells))
+  first <- scworkbench::wb_session_run_op(scworkbench::wb_session_new(),
+    x$bundle, "matrix_log_normalize", inputs = list(matrix = "RNA",
+      cell_set = "all", min_cells = 1L, output_matrix_id = "RNA_log",
+      scale_factor = 1000, chunk_size = 2L, overwrite = FALSE))
+  staged <- scworkbench::wb_session_view(first$session)
+  expected <- log1p(t(t(values) * (1000 / colSums(values))))
+  observed <- as.matrix(scworkbench::wb_slice(staged, "RNA_log",
+    x$features, x$cells))
+  stopifnot(isTRUE(all.equal(observed, expected, tolerance = 1e-10,
+      check.attributes = FALSE)),
+    first$run$outputs$matrix$fragment_manifest$fragment_count >= 2L,
+    first$run$outputs$summary$table$n_zero_library_cells[[1]] == 0L)
+  promoted <- scworkbench::wb_session_promote_current(x$bundle,
+    first$session, outputs = "summary")
+  stopifnot(all(promoted$promoted$status == "ok"),
+    "RNA_log" %in% scworkbench::wb_matrices(x$bundle)$matrix_id,
+    isTRUE(scworkbench::wb_bundle_validation_report(x$root, "content")$ok))
+
+  before <- as.matrix(scworkbench::wb_slice(x$bundle, "RNA_log",
+    x$features, x$cells))
+  options(scworkbench.operation_pack_v3_fragment_test_hook =
+    function(event, fragment_ordinal, ...) {
+      if (identical(event, "before_fragment_write") &&
+          fragment_ordinal == 2L) stop("injected second fragment failure")
+    })
+  on.exit(options(scworkbench.operation_pack_v3_fragment_test_hook = NULL),
+    add = TRUE)
+  failed <- try(scworkbench::wb_session_run_op(scworkbench::wb_session_new(),
+    x$bundle, "matrix_log_normalize", inputs = list(matrix = "RNA",
+      cell_set = "all", min_cells = 1L, output_matrix_id = "RNA_log",
+      scale_factor = 2000, chunk_size = 2L, overwrite = TRUE)), silent = TRUE)
+  options(scworkbench.operation_pack_v3_fragment_test_hook = NULL)
+  stopifnot(inherits(failed, "try-error"), identical(before,
+    as.matrix(scworkbench::wb_slice(x$bundle, "RNA_log", x$features,
+      x$cells))))
+
+  replacement <- scworkbench::wb_session_run_op(
+    scworkbench::wb_session_new(), x$bundle, "matrix_log_normalize",
+    inputs = list(matrix = "RNA", cell_set = "all", min_cells = 1L,
+      output_matrix_id = "RNA_log", scale_factor = 2000,
+      chunk_size = 2L, overwrite = TRUE))
+  replaced <- scworkbench::wb_session_promote_current(x$bundle,
+    replacement$session, outputs = "summary")
+  after <- as.matrix(scworkbench::wb_slice(x$bundle, "RNA_log",
+    x$features, x$cells))
+  stopifnot(all(replaced$promoted$status == "ok"), !identical(before, after),
+    isTRUE(scworkbench::wb_bundle_validation_report(x$root, "content")$ok))
   TRUE
 }

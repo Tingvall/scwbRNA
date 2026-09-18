@@ -1,4 +1,20 @@
-library(scworkbench)
+args <- commandArgs(trailingOnly = TRUE)
+value <- function(prefix) {
+  hit <- args[startsWith(args, paste0("--", prefix, "="))]
+  if (length(hit) != 1L) stop("exactly one --", prefix,
+    "= argument is required")
+  sub(paste0("--", prefix, "="), "", hit, fixed = TRUE)
+}
+core <- normalizePath(value("core-source"), mustWork = TRUE)
+output <- value("output")
+expected_commit <- "03accf6ac81af0a383cc549d2ae89351af55c7d0"
+commit <- trimws(system2("git", c("-C", shQuote(core), "rev-parse", "HEAD"),
+  stdout = TRUE))
+dirty <- system2("git", c("-C", shQuote(core), "status", "--porcelain",
+  "--untracked-files=all"), stdout = TRUE)
+if (!identical(commit, expected_commit) || any(nzchar(dirty)))
+  stop("old-core source must be clean and pinned to ", expected_commit)
+devtools::load_all(core, quiet = TRUE)
 root <- tempfile("scwbrna_old_core_")
 bundle <- wb_init_bundle(root)
 on.exit({ wb_close_bundle(bundle); unlink(root, recursive = TRUE) }, add = TRUE)
@@ -13,28 +29,24 @@ values <- Matrix::Matrix(matrix(c(
   dimnames = list(features, cells)), sparse = TRUE)
 wb_define_cells(bundle, cells)
 wb_attach_matrix(bundle, "RNA", values, feature_type = "gene")
-suffix <- wb_op_cell_suffix_label(bundle, cells = cells, sep = "-",
-  mapping = c(A = "sample_a", B = "sample_b"), default_label = "other")
-qc <- wb_op_rna_qc_metrics(bundle, "RNA", cells,
-  mitochondrial_pattern = "^mt-", ribosomal_pattern = "^rpl",
-  missing_feature_policy = "drop", chunk_size = 2L)
-hvg <- wb_op_hvg_select(bundle, "RNA", cells, n_features = 2L,
-  method = "vst", min_mean = 0, exclude_features = "rpl1",
-  feature_type = "gene", seed = 1L, chunk_size = 2L)
-identity <- function(x) {
-  out <- scworkbench:::.wb_prov_payload_identity(bundle, x)
+normalize_run <- wb_session_run_op(wb_session_new(), bundle,
+  "matrix_log_normalize", inputs = list(matrix = "RNA", cell_set = "all",
+    min_cells = 1L, output_matrix_id = "RNA_log", scale_factor = 1000,
+    overwrite = FALSE))
+normalize <- list(outputs = normalize_run$run$outputs,
+  params = normalize_run$run$params)
+identity <- function(x, identity_bundle = bundle) {
+  out <- scworkbench:::.wb_prov_payload_identity(identity_bundle, x)
   list(scheme = out$content_identity_scheme, sha256 = out$content_sha256)
 }
-record <- function(result) list(outputs = lapply(result$outputs, identity),
+record <- function(result, identity_bundle = bundle) list(outputs = lapply(
+    result$outputs, identity, identity_bundle = identity_bundle),
   params = result$params)
-fixture <- list(schema = "scwbrna.old_core_reference.v1",
-  source_commit = "ca3b4978a025b355aca6aad091c1f419de2cde12",
-  cells = unname(as.list(cells)), features = unname(as.list(features)),
-  values = unname(lapply(seq_len(nrow(values)), function(i)
-    unname(as.list(as.numeric(values[i, ]))))),
-  feature_type = list("gene", "gene", "gene", "gene", "gene"),
-  methods = list(cell_suffix_label = record(suffix),
-    rna_qc_metrics = record(qc), hvg_select = record(hvg)))
-target <- file.path("tests", "fixtures", "old_core_reference.json")
+target <- output
+dir.create(dirname(target), recursive = TRUE, showWarnings = FALSE)
+fixture <- jsonlite::read_json(target, simplifyVector = FALSE)
+fixture$phase4c_source_commit <- expected_commit
+fixture$methods$matrix_log_normalize <- record(normalize,
+  wb_session_view(normalize_run$session))
 writeChar(scworkbench:::.wb_operation_pack_canonical_json(fixture), target,
   eos = NULL, useBytes = TRUE)
