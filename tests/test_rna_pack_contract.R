@@ -5,7 +5,7 @@
 }
 
 .rna_fixture <- function() {
-  reference <- jsonlite::read_json(file.path("tests", "fixtures",
+  reference <- jsonlite::read_json(file.path(.scwbrna_test_root, "fixtures",
     "old_core_reference.json"), simplifyVector = FALSE)
   root <- tempfile("scwbrna_contract_")
   bundle <- scworkbench::wb_init_bundle(root)
@@ -48,18 +48,28 @@ test_scwbrna_old_core_equivalence_contract <- function() {
       chunk_size = 2L))
   runs <- list(cell_suffix_label = suffix$run, rna_qc_metrics = qc$run,
     hvg_select = hvg$run)
+  old_effective_params <- list(
+    cell_suffix_label = list(sep = "-",
+      mapping = list(A = "sample_a", B = "sample_b"),
+      default_label = "other"),
+    rna_qc_metrics = list(mitochondrial_features = NULL,
+      mitochondrial_pattern = "^mt-", ribosomal_features = NULL,
+      ribosomal_pattern = "^rpl", pattern_ignore_case = FALSE,
+      missing_feature_policy = "drop", require_integer_counts = TRUE,
+      integer_tolerance = 1e-8, chunk_size = 2L),
+    hvg_select = list(n_features = 2L, method = "vst", min_mean = 0,
+      max_mean = NULL, min_dispersion = NULL, batch_key = NULL,
+      exclude_features = "rpl1", feature_type = "gene", seed = 1L,
+      chunk_size = 2L)
+  )
   for (method in names(runs)) {
     expected <- x$reference$methods[[method]]$outputs
     observed <- lapply(runs[[method]]$outputs, .rna_identity,
       bundle = x$bundle)
-    stopifnot(identical(observed[names(expected)], expected))
+    stopifnot(setequal(names(observed), names(expected)),
+      identical(observed[names(expected)], expected),
+      identical(runs[[method]]$params, old_effective_params[[method]]))
   }
-  stopifnot(identical(suffix$run$params$sep, "-"),
-    identical(suffix$run$params$default_label, "other"),
-    identical(qc$run$params$chunk_size, 2L),
-    identical(qc$run$params$missing_feature_policy, "drop"),
-    identical(hvg$run$params$method, "vst"),
-    identical(hvg$run$params$feature_type, "gene"))
   TRUE
 }
 

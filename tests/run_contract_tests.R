@@ -1,6 +1,9 @@
 library(scworkbench)
 library(scwbRNA)
-source(file.path("tests", "test_rna_pack_contract.R"), local = FALSE)
+.scwbrna_test_root <- if (file.exists("test_rna_pack_contract.R")) "." else
+  "tests"
+source(file.path(.scwbrna_test_root, "test_rna_pack_contract.R"),
+  local = FALSE)
 tests <- sort(ls(pattern = "^test_", envir = .GlobalEnv))
 failed <- character()
 for (name in tests) {
