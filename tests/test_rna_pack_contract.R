@@ -26,6 +26,16 @@
   list(scheme = x$content_identity_scheme, sha256 = x$content_sha256)
 }
 
+.rna_committed_state <- function(bundle) {
+  dag <- scworkbench::wb_prov_bundle_dag(bundle)
+  list(scientific_state = scworkbench:::.wb_session_source_identity(
+    bundle)$scientific_state_fingerprint,
+    artifacts = nrow(scworkbench::wb_art_list(bundle,
+      include_history = TRUE)),
+    heads = nrow(scworkbench::wb_prov_list_heads(bundle)),
+    runs = sum(as.character(dag$nodes$node_type) == "run"))
+}
+
 test_scwbrna_old_core_equivalence_contract <- function() {
   .rna_activate(); x <- .rna_fixture()
   on.exit({scworkbench::wb_close_bundle(x$bundle); unlink(x$root,
@@ -93,6 +103,83 @@ test_scwbrna_conditional_key_and_integer_contract <- function() {
   counts <- run(mitochondrial_pattern = "^mt-")
   stopifnot(all(counts$value[counts$key == "mitochondrial_counts"] %% 1 == 0),
     all(is.finite(counts$value)), all(counts$value >= 0))
+  TRUE
+}
+
+test_scwbrna_hvg_batch_key_rejection_contract <- function() {
+  .rna_activate(); x <- .rna_fixture()
+  on.exit({try(scworkbench::wb_close_bundle(x$bundle), silent = TRUE);
+    unlink(x$root, recursive = TRUE, force = TRUE)}, add = TRUE)
+  run <- function(batch_key) scworkbench::wb_session_run_op(
+    scworkbench::wb_session_new(), x$bundle, "scwbrna::hvg_select",
+    inputs = list(matrix = "RNA", cell_set = "all", min_cells = 1L,
+      n_features = 2L, method = "vst", batch_key = batch_key,
+      feature_type = "gene", chunk_size = 2L))
+
+  # Null and omission remain the v3 representations of no batch key (omission
+  # is also covered by the full old-core comparator). The generic input
+  # boundary rejects empty strings before dispatch, so that old spelling is
+  # not representable by the accepted v3 transport.
+  null <- run(NULL)
+  stopifnot(is.null(null$run$params$batch_key))
+  scworkbench::wb_session_discard(null$session)
+  before <- .rna_committed_state(x$bundle)
+  error <- tryCatch({run("sample"); NULL}, error = identity)
+  stopifnot(inherits(error, "error"),
+    grepl("batch_key is not supported", conditionMessage(error),
+      fixed = TRUE),
+    identical(before, .rna_committed_state(x$bundle)))
+  TRUE
+}
+
+test_scwbrna_rna_qc_failure_contract <- function() {
+  .rna_activate(); x <- .rna_fixture()
+  on.exit({try(scworkbench::wb_close_bundle(x$bundle), silent = TRUE);
+    unlink(x$root, recursive = TRUE, force = TRUE)}, add = TRUE)
+  cells <- x$cells[1:2]
+  attach <- function(id, values) {
+    dimnames(values) <- list(c("g1", "g2"), cells)
+    scworkbench::wb_attach_matrix(x$bundle, id,
+      Matrix::Matrix(values, sparse = TRUE), feature_type = "gene")
+  }
+  attach("RNA_fractional", matrix(c(1, 0.5, 0, 2), nrow = 2L))
+  attach("RNA_negative", matrix(c(1, -1, 0, 2), nrow = 2L))
+  attach("RNA_nonfinite", matrix(c(Inf, 0, 0, 2), nrow = 2L))
+  run <- function(matrix_id, ...) scworkbench::wb_session_run_op(
+    scworkbench::wb_session_new(), x$bundle, "scwbrna::rna_qc_metrics",
+    inputs = c(list(matrix = matrix_id, cell_set = "all", min_cells = 1L,
+      chunk_size = 2L), list(...)))
+  expect_failure <- function(matrix_id, pattern, ...) {
+    before <- .rna_committed_state(x$bundle)
+    error <- tryCatch({run(matrix_id, ...); NULL}, error = identity)
+    stopifnot(inherits(error, "error"),
+      grepl(pattern, conditionMessage(error), fixed = TRUE),
+      identical(before, .rna_committed_state(x$bundle)))
+    invisible(error)
+  }
+
+  expect_failure("RNA_fractional", "matrix contains non-integer values")
+  expect_failure("RNA_negative", "matrix contains negative or non-finite values")
+  expect_failure("RNA_nonfinite", "finite",
+    require_integer_counts = FALSE)
+  expect_failure("RNA_fractional",
+    "mitochondrial feature ids are absent from the matrix",
+    require_integer_counts = FALSE,
+    mitochondrial_features = "not_present")
+
+  before_drop <- .rna_committed_state(x$bundle)
+  dropped <- run("RNA_fractional", require_integer_counts = FALSE,
+    mitochondrial_features = "not_present",
+    missing_feature_policy = "drop")
+  stopifnot(identical(unique(dropped$run$outputs$metrics$key),
+      c("total_counts", "detected_features")),
+    nrow(dropped$run$outputs$qc_features$table) == 0L,
+    identical(dropped$run$outputs$qc_features$meta$missing_feature_policy,
+      "drop"),
+    identical(dropped$run$outputs$summary$meta$mitochondrial_missing_features,
+      "not_present"))
+  scworkbench::wb_session_discard(dropped$session)
+  stopifnot(identical(before_drop, .rna_committed_state(x$bundle)))
   TRUE
 }
 

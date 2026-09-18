@@ -1,4 +1,10 @@
 .run_hvg_select <- function(readers, writers, params, context) {
+  batch_key <- params$batch_key %||% NULL
+  if (!is.null(batch_key) && length(batch_key) == 1L &&
+      !is.na(batch_key) && nzchar(as.character(batch_key)[1])) {
+    stop("hvg_select: batch_key is not supported; batch-aware HVG selection is not implemented",
+      call. = FALSE)
+  }
   annotations <- readers$feature_annotations()
   capability <- context$typed_slice_reads$matrix_chunks
   all_features <- as.character(capability$features)
