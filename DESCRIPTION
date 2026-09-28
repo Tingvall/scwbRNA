@@ -9,5 +9,5 @@ Description: Provisional independently installable RNA QC, feature-selection,
 License: MIT + file LICENSE
 Encoding: UTF-8
 Imports: Matrix, scworkbench
-Suggests: jsonlite
+Suggests: DBI, jsonlite
 RoxygenNote: 7.3.2
