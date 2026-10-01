@@ -1,8 +1,9 @@
-# scwbRNA (provisional)
+# scwbRNA
 
-This provisional operation pack contains `cell_suffix_label`,
+This ABI-v3 operation pack contains `cell_suffix_label`,
 `rna_qc_metrics`, `hvg_select`, and `matrix_log_normalize`. It is not the
-complete planned RNA pack.
+complete inventory of possible RNA methods. The standard profile selects these
+four operations under `scwbrna::`.
 Installation is inert; explicit scworkbench activation is required.
 
 The pack uses operation-pack ABI v3 only. `cell_suffix_label` receives an
@@ -33,5 +34,5 @@ wb_session_run_op(session, bundle, "scwbrna::matrix_log_normalize",
 The four packed methods preserve the pinned former-core defaults, terminal
 primitive identities, promotion closure, replay equivalence, and effective
 parameter records. Batch-aware HVG selection remains explicitly unsupported;
-the provisional pack makes no claim to contain PCA, UMAP, or biological
+the pack makes no claim to contain PCA, UMAP, or biological
 annotation methods.
